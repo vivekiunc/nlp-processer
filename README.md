@@ -1,1 +1,1 @@
-Building an nlp proccesser that is multimodal focusing on regional languages in India
+Building an nlp processer that is trained on regional languages in India
