@@ -1,9 +1,13 @@
 import os
+import re
 from langchain_openai import AzureOpenAIEmbeddings
 from langchain_chroma import Chroma
 from dotenv import load_dotenv
+from llm_client import translate
 
 load_dotenv()
+
+TELUGU_RE = re.compile(r"[ఀ-౿]")
 
 embeddings = AzureOpenAIEmbeddings(
     azure_deployment="text-embedding-3-small",
@@ -18,12 +22,46 @@ vector_store = Chroma(
 )
 
 
+
+
 def querier(query: str, top_k: int = 3):
-    results = vector_store.similarity_search(query, k=top_k)
+    # The knowledge base mixes English and Telugu documents. A query embedded in only its
+    # original language tends to match documents in that same language/script, even when a
+    # differently-worded document in the other language is the more relevant match. Searching
+    # with a translated variant of the query too, and merging results by score, bridges that gap.
+    other_language = "English" if TELUGU_RE.search(query) else "Telugu"
+    translated = translate(query, other_language)
+
+    query_variants = [query]
+    if translated.strip() and translated.strip() != query.strip():
+        query_variants.append(translated)
+
+    # Distance scores from different query embeddings aren't on a directly comparable scale, so
+    # merging by raw score can let a mediocre same-language match crowd out the translated
+    # variant's true hit. Interleaving round-robin across variants guarantees each one's best
+    # matches make it into the final top_k instead of being outscored away.
+    per_variant_results = [
+        vector_store.similarity_search_with_score(q, k=top_k) for q in query_variants
+    ]
+
+    seen = set()
+    ranked_docs = []
+    for round_idx in range(top_k):
+        for variant_results in per_variant_results:
+            if len(ranked_docs) >= top_k or round_idx >= len(variant_results):
+                continue
+            doc, _ = variant_results[round_idx]
+            key = (doc.metadata.get("source"), doc.page_content)
+            if key in seen:
+                continue
+            seen.add(key)
+            ranked_docs.append(doc)
+
     retrieved_chunks = []
-    for doc in results:
+    for doc in ranked_docs:
         meta = doc.metadata
         retrieved_chunks.append({
+            "text": doc.page_content,
             "crop": meta.get("crop"),
             "region": meta.get("region"),
             "language": meta.get("language"),
