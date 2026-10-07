@@ -1,21 +1,26 @@
+import argparse
 import json
 import os
 import jiwer
-from context import transcribe
+from context import DEFAULT_LANGUAGE, transcribe
 
-EVAL_DIR = "/Users/vivekindlamuri/rag_system/sources/audio_samples/eval"
-MANIFEST_PATH = os.path.join(EVAL_DIR, "manifest.json")
+EVAL_DIRS = {
+    "te": "/Users/vivekindlamuri/rag_system/sources/audio_samples/eval",
+    "mr": "/Users/vivekindlamuri/rag_system/sources/audio_samples/eval_mr",
+}
 
 
-def run_eval():
-    with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
+def run_eval(language: str = DEFAULT_LANGUAGE):
+    eval_dir = EVAL_DIRS[language]
+    manifest_path = os.path.join(eval_dir, "manifest.json")
+    with open(manifest_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
     rows = []
     for entry in manifest:
-        audio_path = os.path.join(EVAL_DIR, entry["file"])
+        audio_path = os.path.join(eval_dir, entry["file"])
         reference = entry["reference"]
-        hypothesis = transcribe(audio_path).strip()
+        hypothesis = transcribe(audio_path, language).strip()
         sample_wer = jiwer.wer(reference, hypothesis)
         sample_cer = jiwer.cer(reference, hypothesis)
         rows.append({
@@ -49,5 +54,9 @@ def print_report(rows, corpus_wer, corpus_cer):
 
 
 if __name__ == "__main__":
-    rows, corpus_wer, corpus_cer = run_eval()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--language", choices=sorted(EVAL_DIRS), default=DEFAULT_LANGUAGE)
+    args = parser.parse_args()
+
+    rows, corpus_wer, corpus_cer = run_eval(args.language)
     print_report(rows, corpus_wer, corpus_cer)

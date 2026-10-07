@@ -1,13 +1,21 @@
+import re
+import threading
+
 import torch
 from transformers import pipeline
 from langchain_core.messages import SystemMessage, HumanMessage
 from llm_client import llm
 from retrieval import querier
 
-MODEL_PATH = "/Users/vivekindlamuri/rag_system/models/telugu_whisper"
-LANGUAGE_CODE = "te"
+_SOURCE_LINE_RE = re.compile(r"(?i)\bsource\s*:")
 
-AGRI_SYSTEM_PROMPT = """You are a helpful agricultural assistant for farmers, especially those growing crops in Andhra Pradesh, India. Farmers may ask you questions in English or Telugu about crops, irrigation, pests, diseases, seed varieties, and related topics.
+ASR_MODELS = {
+    "te": "/Users/vivekindlamuri/rag_system/models/telugu_whisper",
+    "mr": "/Users/vivekindlamuri/rag_system/models/marathi_whisper",
+}
+DEFAULT_LANGUAGE = "te"
+
+AGRI_SYSTEM_PROMPT = """You are a helpful agricultural assistant for farmers, especially those growing crops in Andhra Pradesh, India. Farmers may ask you questions in English, Telugu, or Marathi about crops, irrigation, pests, diseases, seed varieties, and related topics.
 
 Always follow this order when answering a farmer's question:
 1. First, carefully read the "Retrieved context" section below. It comes from a curated knowledge base of agricultural documents (government reports, research papers, extension guides).
@@ -17,27 +25,43 @@ Always follow this order when answering a farmer's question:
 5. If neither the retrieved context nor your general knowledge is enough to answer confidently, say so honestly instead of guessing.
 """
 
-if torch.cuda.is_available():
-    device = "cuda"
-elif torch.backends.mps.is_available():
-    device = "mps"
-else:
-    device = "cpu"
+_whisper_asr = {}
+_whisper_lock = threading.Lock()
 
-whisper_asr = pipeline(
-    "automatic-speech-recognition",
-    model=MODEL_PATH,
-    device=device,
-)
 
-whisper_asr.model.config.forced_decoder_ids = (
-    whisper_asr.tokenizer.get_decoder_prompt_ids(
-        language=LANGUAGE_CODE, task="transcribe"
-    )
-)
+def _get_whisper_asr(language: str):
+    # Loading a model is expensive (weights into memory/GPU) and is only ever needed for
+    # audio queries, so each language's pipeline is built lazily on first use rather than on
+    # import — text-only queries, and every `uvicorn --reload` restart, shouldn't pay for a
+    # model they may never use. Each language is cached separately since forced_decoder_ids
+    # is baked into the model config at load time.
+    if language not in ASR_MODELS:
+        raise ValueError(f"Unsupported ASR language: {language!r}")
 
-def transcribe(audio_path: str) -> str:
-    result = whisper_asr(audio_path)
+    if language not in _whisper_asr:
+        with _whisper_lock:
+            if language not in _whisper_asr:
+                if torch.cuda.is_available():
+                    device = "cuda"
+                elif torch.backends.mps.is_available():
+                    device = "mps"
+                else:
+                    device = "cpu"
+
+                asr = pipeline(
+                    "automatic-speech-recognition",
+                    model=ASR_MODELS[language],
+                    device=device,
+                )
+                asr.model.config.forced_decoder_ids = asr.tokenizer.get_decoder_prompt_ids(
+                    language=language, task="transcribe"
+                )
+                _whisper_asr[language] = asr
+    return _whisper_asr[language]
+
+
+def transcribe(audio_path: str, language: str = DEFAULT_LANGUAGE) -> str:
+    result = _get_whisper_asr(language)(audio_path)
     return result["text"]
 
 
@@ -45,7 +69,7 @@ def _drop_unverified_citations(answer: str, retrieved: list) -> str:
     known_sources = {c["source"] for c in retrieved if c.get("source")}
     kept_lines = [
         line for line in answer.splitlines()
-        if "source" not in line.lower()
+        if not _SOURCE_LINE_RE.search(line)
         or any(src in line for src in known_sources)
     ]
     return "\n".join(kept_lines).strip()
@@ -71,17 +95,18 @@ def answer_query(query: str, top_k: int = 3) -> str:
     return _drop_unverified_citations(response.content, retrieved)
 
 
-def transcribe_and_answer(audio_path: str, top_k: int = 3) -> str:
-    query = transcribe(audio_path)
-    print(f"Transcribed Telugu query: {query}")
+def transcribe_and_answer(audio_path: str, top_k: int = 3, language: str = DEFAULT_LANGUAGE) -> str:
+    query = transcribe(audio_path, language)
+    print(f"Transcribed {language} query: {query}")
     return answer_query(query, top_k)
 
 
 if __name__ == "__main__":
     mode = input("Query by (t)ext or (a)udio? ").strip().lower()
     if mode == "a":
-        audio_path = input("Path to Telugu audio file: ")
-        answer = transcribe_and_answer(audio_path)
+        audio_path = input("Path to audio file: ")
+        language = input(f"Language code {list(ASR_MODELS)} [default {DEFAULT_LANGUAGE}]: ").strip() or DEFAULT_LANGUAGE
+        answer = transcribe_and_answer(audio_path, language=language)
     else:
         query = input("What can I help you with? ")
         answer = answer_query(query)

@@ -1,5 +1,6 @@
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from langchain_openai import AzureOpenAIEmbeddings
 from langchain_chroma import Chroma
 from dotenv import load_dotenv
@@ -40,9 +41,14 @@ def querier(query: str, top_k: int = 3):
     # merging by raw score can let a mediocre same-language match crowd out the translated
     # variant's true hit. Interleaving round-robin across variants guarantees each one's best
     # matches make it into the final top_k instead of being outscored away.
-    per_variant_results = [
-        vector_store.similarity_search_with_score(q, k=top_k) for q in query_variants
-    ]
+    #
+    # Each variant's search is an independent, blocking network call (embed + Chroma lookup), so
+    # run them concurrently instead of waiting on one before starting the next.
+    with ThreadPoolExecutor(max_workers=len(query_variants)) as pool:
+        per_variant_results = list(pool.map(
+            lambda q: vector_store.similarity_search_with_score(q, k=top_k),
+            query_variants,
+        ))
 
     seen = set()
     ranked_docs = []
